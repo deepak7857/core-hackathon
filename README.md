@@ -158,8 +158,6 @@ src/
 └── types/
 prisma/
 └── schema.prisma
-scripts/
-└── seedAnomalies.js
 ```
 
 ## Production
