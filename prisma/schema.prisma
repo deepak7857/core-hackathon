@@ -1,0 +1,40 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Severity {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum AnomalyStatus {
+  OPEN
+  IN_REPAIR
+  REPAIRED
+}
+
+model Anomaly {
+  id           String        @id @default(cuid())
+  deviceId     String
+  lat          Float
+  lng          Float
+  speedKmh     Float
+  zPeakG       Float
+  depthCm      Float
+  waterPresent Boolean       @default(false)
+  severity     Severity      @default(LOW)
+  status       AnomalyStatus @default(OPEN)
+  resolvedAt   DateTime?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  @@index([lat, lng])
+  @@index([createdAt])
+  @@index([status])
+}

@@ -1,69 +1,229 @@
-import Image from "next/image";
+'use client';
 
-export default function Home() {
+import { useState, useEffect, useCallback, useRef } from 'react';
+import GoogleMapView from '@/components/map/GoogleMapView';
+import StatsBar from '@/components/dashboard/StatsBar';
+import RecentAlerts from '@/components/dashboard/RecentAlerts';
+import RouteSearch from '@/components/RouteSearch';
+import DriverAlertHUD from '@/components/dashboard/DriverAlertHUD';
+import { isPointNearRoute, getDistanceMeters } from '@/lib/geoUtils';
+import { speakAlert, playBeepTone } from '@/lib/audioAlert';
+
+export default function Dashboard() {
+  const [anomalies, setAnomalies] = useState([]);
+  const [selectedAnomaly, setSelectedAnomaly] = useState(null);
+  const [filterWaterOnly, setFilterWaterOnly] = useState(false);
+
+  const [directionsResult, setDirectionsResult] = useState(null);
+  const [parsedRoutes, setParsedRoutes] = useState([]);
+  const [selectedRouteIdx, setSelectedRouteIdx] = useState(0);
+
+  const [activeAlert, setActiveAlert] = useState(null);
+  const [isSimulating, setIsSimulating] = useState(false);
+  const simTimerRef = useRef(null);
+
+  const fetchData = useCallback(async () => {
+    try {
+      const res = await fetch('/api/anomalies');
+      if (res.ok) {
+        const data = await res.json();
+        setAnomalies(data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch anomalies:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchData();
+    const interval = setInterval(fetchData, 2500);
+    return () => clearInterval(interval);
+  }, [fetchData]);
+  const handleCalculateRoute = (origin, destination) => {
+    if (!window.google || !window.google.maps) {
+      alert('Google Maps is still loading. Please retry.');
+      return;
+    }
+
+    const directionsService = new window.google.maps.DirectionsService();
+
+    directionsService.route(
+      {
+        origin,
+        destination,
+        travelMode: window.google.maps.TravelMode.DRIVING,
+        provideRouteAlternatives: true,
+      },
+      (result, status) => {
+        if (status === window.google.maps.DirectionsStatus.OK) {
+          setDirectionsResult(result);
+
+          const openAnomalies = anomalies.filter((a) => a.status !== 'REPAIRED');
+          const routesAnalyzed = result.routes.map((rt, idx) => {
+            const path = rt.overview_path;
+            const onRoute = openAnomalies.filter((a) => isPointNearRoute(a, path, 30));
+            const penaltyScore = onRoute.reduce((acc, curr) => acc + (curr.depthCm || 2), 0);
+
+            return {
+              index: idx,
+              summary: rt.summary || `Route ${idx + 1}`,
+              distanceText: rt.legs[0].distance.text,
+              durationText: rt.legs[0].duration.text,
+              hazardCount: onRoute.length,
+              penaltyScore,
+              hazards: onRoute,
+              isSafest: false,
+            };
+          });
+          let safestIdx = 0;
+          let minPenalty = Infinity;
+          routesAnalyzed.forEach((r, i) => {
+            if (r.penaltyScore < minPenalty) {
+              minPenalty = r.penaltyScore;
+              safestIdx = i;
+            }
+          });
+          routesAnalyzed[safestIdx].isSafest = true;
+
+          setParsedRoutes(routesAnalyzed);
+          setSelectedRouteIdx(safestIdx); 
+        } else {
+          alert(`Route query failed: ${status}`);
+        }
+      }
+    );
+  };
+
+  const handleClearRoute = () => {
+    if (simTimerRef.current) clearInterval(simTimerRef.current);
+    setIsSimulating(false);
+    setDirectionsResult(null);
+    setParsedRoutes([]);
+    setSelectedRouteIdx(0);
+    setActiveAlert(null);
+  };
+  const handleSimulateDrive = () => {
+    if (!directionsResult || !parsedRoutes[selectedRouteIdx]) return;
+    if (isSimulating) {
+      clearInterval(simTimerRef.current);
+      setIsSimulating(false);
+      setActiveAlert(null);
+      return;
+    }
+
+    setIsSimulating(true);
+    const activeRoute = directionsResult.routes[selectedRouteIdx];
+    const path = activeRoute.overview_path;
+    const hazardsOnRoute = parsedRoutes[selectedRouteIdx].hazards;
+
+    let step = 0;
+    const alertedSet = new Set();
+
+    simTimerRef.current = setInterval(() => {
+      if (step >= path.length) {
+        clearInterval(simTimerRef.current);
+        setIsSimulating(false);
+        setActiveAlert(null);
+        speakAlert('Destination reached safely.');
+        return;
+      }
+
+      const carPos = { lat: path[step].lat(), lng: path[step].lng() };
+      for (const h of hazardsOnRoute) {
+        if (!alertedSet.has(h.id)) {
+          const dist = Math.round(getDistanceMeters(carPos.lat, carPos.lng, h.lat, h.lng));
+          if (dist <= 70) {
+            alertedSet.add(h.id);
+            playBeepTone();
+            const warningMsg = h.waterPresent
+              ? `Caution: Water-submerged road hazard in ${dist} meters.`
+              : `Caution: Road cavity of depth ${h.depthCm} centimeters in ${dist} meters.`;
+
+            setActiveAlert({
+              distanceMeters: dist,
+              message: warningMsg,
+            });
+            speakAlert(warningMsg);
+            break;
+          }
+        }
+      }
+
+      step += 2;
+    }, 600);
+  };
+
+  const displayedAnomalies = filterWaterOnly
+    ? anomalies.filter((a) => a.waterPresent)
+    : anomalies;
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.js
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+    <main className="min-h-screen bg-slate-950 text-slate-100 p-6 flex flex-col gap-6 relative">
+      <DriverAlertHUD
+        activeAlert={activeAlert}
+        onDismiss={() => setActiveAlert(null)}
+      />
+
+      <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b border-slate-800 pb-5">
+        <div>
+          <div className="flex items-center gap-2">
+            <div className="text-2xl font-bold tracking-tight text-white">
+             <h2> ARIS</h2> <h3>Advanced Road Inspection System</h3>
+            </div>
+            <span className="px-2 py-0.5 text-[10px] font-semibold bg-indigo-900/60 text-indigo-300 border border-indigo-700/50 rounded-full">
+              PostgreSQL Connected
+            </span>
+          </div>
+          <p className="text-sm text-slate-400 mt-0.5">
+            ADAS Real-Time Proximity Alerting & Safest-Path Navigation Engine
           </p>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => setFilterWaterOnly(!filterWaterOnly)}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
+              filterWaterOnly
+                ? 'bg-cyan-950 border-cyan-500 text-cyan-300'
+                : 'bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700'
+            }`}
           >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+            {filterWaterOnly ? '✓ Filtering: Water Only' : 'Filter: Water Hazards'}
+          </button>
         </div>
-      </main>
-    </div>
+      </header>
+
+      <StatsBar anomalies={anomalies} />
+
+      <RouteSearch
+        onCalculateRoute={handleCalculateRoute}
+        routesList={parsedRoutes}
+        selectedRouteIndex={selectedRouteIdx}
+        onSelectRouteIndex={(idx) => setSelectedRouteIdx(idx)}
+        onClearRoute={handleClearRoute}
+        onSimulateDrive={handleSimulateDrive}
+        isSimulating={isSimulating}
+      />
+
+      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 flex-1 items-start">
+        <div className="lg:col-span-1 h-[650px]">
+          <RecentAlerts
+            anomalies={displayedAnomalies}
+            selectedId={selectedAnomaly?.id}
+            onSelect={(item) => setSelectedAnomaly(item)}
+          />
+        </div>
+
+        <div className="lg:col-span-3 h-[650px]">
+          <GoogleMapView
+            anomalies={displayedAnomalies}
+            selectedAnomaly={selectedAnomaly}
+            onSelectAnomaly={(item) => setSelectedAnomaly(item)}
+            directionsResponse={directionsResult}
+            routeIndex={selectedRouteIdx}
+          />
+        </div>
+      </div>
+    </main>
   );
 }
